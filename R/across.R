@@ -6,6 +6,8 @@
 #' functions like [summarise()] and [mutate()]. See `vignette("colwise")` for
 #'  more details.
 #'
+#' `pairwise()` is similar to `across()` except that it passes two columns at a time
+#'
 #' `if_any()` and `if_all()` apply the same
 #' predicate function to a selection of columns and combine the
 #' results into a single logical vector.
@@ -33,9 +35,17 @@
 #'   `{.fn}` to stand for the name of the function being applied. The default
 #'   (`NULL`) is equivalent to `"{.col}"` for the single function case and
 #'   `"{.col}_{.fn}"` for the case where a list is used for `.fns`.
+#'   For pairwise, it can use `{.col_x}` and `{.col_y}` for the columns that gets passed
+#'   and uses the following format with multiple `.fns`: `"{.col_x}_{.col_y}_{.fn}"`
+#'
+#' @param .is_commutative If `TRUE`, then only one column would be created the same combination of
+#'   `.col_x` and `.col_y` (ie. `{.col_x}_{.col_y}` and `{.col_y}_{.col_x}` are the same)
+#'   e.g. corr(x, y) is the same as corr(y, x)
 #'
 #' @returns
 #' `across()` returns a tibble with one column for each column in `.cols` and each function in `.fns`.
+#'
+#' `pairwise()` returns a tibble with one column per all possible pairwise combination in `.cols`
 #'
 #' `if_any()` and `if_all()` return a logical vector.
 #' @examples
@@ -145,6 +155,80 @@ across <- function(.cols = everything(), .fns = NULL, ..., .names = NULL) {
   new_data_frame(out, n = size, class = c("tbl_df", "tbl"))
 }
 
+#' @export
+pairwise <- function(.cols = everything(), .fns = NULL, ..., .names = NULL, .is_commutative = FALSE) {
+  key <- key_deparse(sys.call())
+  setup <- pairwise_setup({{ .cols }}, fns = .fns, names = .names, key = key, .caller_env = caller_env(), is_commutative = .is_commutative)
+
+  vars <- setup$vars
+  if (length(vars) == 0L) {
+    return(new_tibble(list(), nrow = 1L))
+  }
+  fns <- setup$fns
+  names <- setup$names
+
+  mask <- peek_mask()
+  data <- mask$current_cols(vars)
+
+  if (is.null(fns)) {
+    nrow <- length(mask$current_rows())
+    data <- new_data_frame(data, n = nrow, class = c("tbl_df", "tbl"))
+
+    if (is.null(names)) {
+      return(data)
+    } else {
+      return(set_names(data, names))
+    }
+  }
+
+
+  n_cols <- length(data)
+  n_fns <- length(fns)
+
+  if (.is_commutative) {
+    total_pairwise_cols <- choose(length(data), 2)
+  } else {
+    total_pairwise_cols <- length(data) * (length(data) - 1)
+  }
+
+  seq_n_cols <- seq_len(n_cols)
+  seq_fns <- seq_len(n_fns)
+
+  k <- 1L
+  out <- vector("list", total_pairwise_cols * n_fns)
+
+  # Reset `cur_column()` info on exit
+  old_var <- context_peek_bare("column")
+  on.exit(context_poke("column", old_var), add = TRUE)
+
+  # Loop in such an order that all functions are applied
+  # to a single column before moving on to the next column
+  for (i in seq_n_cols) {
+    for (h in seq_n_cols) {
+      if (.is_commutative & h <= i) next
+      if (i == h) next
+      var_x <- vars[[i]]
+      var_y <- vars[[h]]
+
+      col_x <- data[[i]]
+      col_y <- data[[h]]
+
+      context_poke("column", var_x)
+
+      for (j in seq_fns) {
+        fn <- fns[[j]]
+        out[[k]] <- fn(col_x, col_y, ...)
+        k <- k + 1L
+      }
+    }
+  }
+
+  size <- vec_size_common(!!!out)
+  out <- vec_recycle_common(!!!out, .size = size)
+  names(out) <- names
+  new_data_frame(out, n = size, class = c("tbl_df", "tbl"))
+}
+
 #' @rdname across
 #' @export
 if_any <- function(.cols = everything(), .fns = NULL, ..., .names = NULL) {
@@ -204,6 +288,17 @@ across_glue_mask <- function(.col, .fn, .caller_env) {
   glue_mask
 }
 
+pairwise_glue_mask <- function(.col_x, .col_y, .fn, .caller_env) {
+  glue_mask <- env(.caller_env, .col_x = .col_x, .col_y = .col_y, .fn = .fn)
+  # TODO: we can make these bindings louder later
+  env_bind_active(
+    glue_mask,
+    col_x = function() glue_mask$.col_x, col_y = function() glue_mask$.col_y,
+    fn = function() glue_mask$.fn
+  )
+  glue_mask
+}
+
 # TODO: The usage of a cache in `across_setup()` and `c_across_setup()` is a stopgap solution, and
 # this idea should not be used anywhere else. This should be replaced by the
 # next version of hybrid evaluation, which should offer a way for any function
@@ -216,6 +311,20 @@ across_setup <- function(cols, fns, names, key, .caller_env) {
     value <- across_setup_impl({{ cols }},
       fns = fns, names = names, .caller_env = .caller_env, mask = mask,
       .top_level = FALSE
+    )
+    mask$across_cache_add(key, value)
+  }
+  value
+}
+
+pairwise_setup <- function(cols, fns, names, key, .caller_env, is_commutative) {
+  mask <- peek_mask("across()")
+  value <- mask$across_cache_get(key)
+  if (is.null(value)) {
+    value <- pairwise_setup_impl({{ cols }},
+      fns = fns, names = names, .caller_env = .caller_env, mask = mask,
+      .top_level = FALSE,
+      is_commutative = is_commutative
     )
     mask$across_cache_add(key, value)
   }
@@ -280,8 +389,100 @@ across_setup_impl <- function(cols, fns, names, .caller_env, mask = peek_mask("a
 
   glue_mask <- glue_mask <- across_glue_mask(.caller_env,
     .col = rep(vars, each = length(fns)),
-    .fn  = rep(names_fns, length(vars))
+    .fn = rep(names_fns, length(vars))
   )
+  names <- vec_as_names(glue(names, .envir = glue_mask), repair = "check_unique")
+
+  list(vars = vars, fns = fns, names = names)
+}
+
+pairwise_setup_impl <- function(cols, fns, names, .caller_env, is_commutative, mask = peek_mask("across()"), .top_level = FALSE) {
+  cols <- enquo(cols)
+
+  if (.top_level) {
+    # FIXME: this is a little bit hacky to make top_across()
+    #        work, otherwise mask$across_cols() fails when calling
+    #        self$current_cols(across_vars_used)
+    #        it should not affect anything because it is expected that
+    #        across_setup() is only ever called on the first group anyway
+    #        but perhaps it is time to review how across_cols() work
+    mask$set_current_group(1L)
+  }
+  # `across()` is evaluated in a data mask so we need to remove the
+  # mask layer from the quosure environment (#5460)
+  cols <- quo_set_env(cols, data_mask_top(quo_get_env(cols), recursive = FALSE, inherit = TRUE))
+
+  vars <- tidyselect::eval_select(cols, data = mask$across_cols())
+  vars <- names(vars)
+
+  # build .col_x, .col_y depending on commutative or not
+  length_vars <- length(vars)
+  if (is_commutative) {
+    k <- 1L
+    .col_x <- vector("integer", choose(length_vars, 2))
+    .col_y <- vector("integer", choose(length_vars, 2))
+    for (v in seq_along(vars)) {
+      if (v == length(vars)) break
+      for (u in ((v + 1):length_vars)) {
+        .col_x[k] <- vars[v]
+        .col_y[k] <- vars[u]
+        k <- k + 1L
+      }
+    }
+  } else {
+    .col_x_list <- list()
+    .col_y_list <- list()
+    for (v in seq_along(vars)) {
+      .col_x_list[[v]] <- rep(vars[v], length_vars - 1)
+      .col_y_list[[v]] <- vars[((1:length_vars) != v)]
+    }
+    .col_x <- unlist(.col_x_list)
+    .col_y <- unlist(.col_y_list)
+  }
+
+  if (is.null(fns)) {
+    if (!is.null(names)) {
+      glue_mask <- pairwise_glue_mask(.caller_env, .col_x = .col_x, .col_y = .col_y, .fn = "1")
+      names <- vec_as_names(glue(names, .envir = glue_mask), repair = "check_unique")
+    }
+
+    value <- list(vars = vars, fns = fns, names = names)
+    return(value)
+  }
+
+  # apply `.names` smart default
+  if (is.function(fns) || is_formula(fns)) {
+    names <- names %||% "{.col_x}_{.col_y}"
+    fns <- list("1" = fns)
+  } else {
+    names <- names %||% "{.col_x}_{.col_y}_{.fn}"
+  }
+
+  if (!is.list(fns)) {
+    abort(c("Problem with `across()` input `.fns`.",
+      i = "Input `.fns` must be NULL, a function, a formula, or a list of functions/formulas."
+    ))
+  }
+
+  fns <- map(fns, as_function)
+
+  # make sure fns has names, use number to replace unnamed
+  if (is.null(names(fns))) {
+    names_fns <- seq_along(fns)
+  } else {
+    names_fns <- names(fns)
+    empties <- which(names_fns == "")
+    if (length(empties)) {
+      names_fns[empties] <- empties
+    }
+  }
+
+  glue_mask <- glue_mask <- pairwise_glue_mask(.caller_env,
+    .col_x = rep(.col_x, each = length(fns)),
+    .col_y = rep(.col_y, each = length(fns)),
+    .fn = rep(names_fns, length(.col_y))
+  )
+
   names <- vec_as_names(glue(names, .envir = glue_mask), repair = "check_unique")
 
   list(vars = vars, fns = fns, names = names)

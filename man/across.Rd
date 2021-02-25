@@ -32,14 +32,22 @@ to access the current column and grouping keys respectively.}
 columns. This can use \code{{.col}} to stand for the selected column name, and
 \code{{.fn}} to stand for the name of the function being applied. The default
 (\code{NULL}) is equivalent to \code{"{.col}"} for the single function case and
-\code{"{.col}_{.fn}"} for the case where a list is used for \code{.fns}.}
+\code{"{.col}_{.fn}"} for the case where a list is used for \code{.fns}.
+For pairwise, it can use \code{{.col_x}} and \code{{.col_y}} for the columns that gets passed
+and uses the following format with multiple \code{.fns}: \code{"{.col_x}_{.col_y}_{.fn}"}}
 
 \item{cols, .cols}{<\code{\link[=dplyr_tidy_select]{tidy-select}}> Columns to transform.
 Because \code{across()} is used within functions like \code{summarise()} and
 \code{mutate()}, you can't select or compute upon grouping variables.}
+
+\item{.is_commutative}{If \code{TRUE}, then only one column would be created the same combination of
+\code{.col_x} and \code{.col_y} (ie. \verb{\{.col_x\}_\{.col_y\}} and \verb{\{.col_y\}_\{.col_x\}} are the same)
+e.g. corr(x, y) is the same as corr(y, x)}
 }
 \value{
 \code{across()} returns a tibble with one column for each column in \code{.cols} and each function in \code{.fns}.
+
+\code{pairwise()} returns a tibble with one column per all possible pairwise combination in \code{.cols}
 
 \code{if_any()} and \code{if_all()} return a logical vector.
 }
@@ -48,6 +56,8 @@ Because \code{across()} is used within functions like \code{summarise()} and
 columns, allowing you to use \code{\link[=select]{select()}} semantics inside in "data-masking"
 functions like \code{\link[=summarise]{summarise()}} and \code{\link[=mutate]{mutate()}}. See \code{vignette("colwise")} for
 more details.
+
+\code{pairwise()} is similar to \code{across()} except that it passes two columns at a time
 
 \code{if_any()} and \code{if_all()} apply the same
 predicate function to a selection of columns and combine the
